@@ -1,2 +1,0 @@
-# Bottrade
-Trd
