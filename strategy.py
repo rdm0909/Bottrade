@@ -1,51 +1,77 @@
 """
 strategy.py -- Analyse technique composite (7 indicateurs)
 Bot Polymarket BTC 5-min Hausse/Baisse
+FIXED: Binance remplacé par Kraken (pas de blocage géo sur Railway/Replit)
 """
 import requests
 import time
 from typing import Optional
 
-
-BINANCE_API = "https://api.binance.com"
+KRAKEN_API = "https://api.kraken.com"
+COINGECKO_API = "https://api.coingecko.com/api/v3"
 
 
 def get_btc_candles(interval="1m", limit=30):
-    """Recupere les bougies BTC depuis Binance."""
+    """Récupère les bougies BTC depuis Kraken (public, sans restriction géo)."""
+    kraken_interval = 1  # 1 minute
     try:
         resp = requests.get(
-            BINANCE_API + "/api/v3/klines",
-            params={"symbol": "BTCUSDT", "interval": interval, "limit": limit},
-            timeout=5,
+            KRAKEN_API + "/0/public/OHLC",
+            params={"pair": "XBTUSD", "interval": kraken_interval},
+            timeout=10,
         )
         data = resp.json()
-        return [
+        if data.get("error"):
+            print("Kraken OHLC error: " + str(data["error"]))
+            return []
+        # Kraken: [time, open, high, low, close, vwap, volume, count]
+        candles_raw = data["result"]["XXBTZUSD"]
+        candles = [
             {
-                "time": c[0],
+                "time": int(c[0]) * 1000,  # en ms (compatibilité Binance)
                 "open": float(c[1]),
                 "high": float(c[2]),
                 "low": float(c[3]),
                 "close": float(c[4]),
-                "volume": float(c[5]),
+                "volume": float(c[6]),
             }
-            for c in data
+            for c in candles_raw
         ]
+        # Kraken renvoie ~720 bougies, on prend les dernières
+        return candles[-limit:]
     except Exception as e:
-        print("Binance candles error: " + str(e))
+        print("Kraken candles error: " + str(e))
         return []
 
 
 def get_btc_price():
-    """Prix BTC actuel."""
+    """Prix BTC actuel depuis Kraken, fallback CoinGecko."""
+    # 1. Tentative Kraken (primaire)
     try:
         resp = requests.get(
-            BINANCE_API + "/api/v3/ticker/price",
-            params={"symbol": "BTCUSDT"},
-            timeout=3,
+            KRAKEN_API + "/0/public/Ticker",
+            params={"pair": "XBTUSD"},
+            timeout=5,
         )
-        return float(resp.json()["price"])
+        data = resp.json()
+        if not data.get("error"):
+            price = float(data["result"]["XXBTZUSD"]["c"][0])
+            return price
     except Exception as e:
-        print("Binance price error: " + str(e))
+        print("Kraken price error: " + str(e))
+
+    # 2. Fallback CoinGecko (secondaire)
+    try:
+        resp = requests.get(
+            COINGECKO_API + "/simple/price",
+            params={"ids": "bitcoin", "vs_currencies": "usd"},
+            timeout=8,
+        )
+        price = float(resp.json()["bitcoin"]["usd"])
+        print("  [Fallback CoinGecko] BTC: $" + str(price))
+        return price
+    except Exception as e:
+        print("CoinGecko price error: " + str(e))
         return None
 
 
@@ -74,7 +100,7 @@ def compute_rsi(closes, period=14):
 
 
 def estimate_token_price(delta_pct):
-    """Prix estime du token gagnant base sur le delta BTC."""
+    """Prix estimé du token gagnant basé sur le delta BTC."""
     abs_delta = abs(delta_pct)
     if abs_delta < 0.005:
         return 0.50
@@ -94,7 +120,7 @@ def analyze(candles, ticks, window_open, current_price, verbose=True):
     """
     Analyse composite -- retourne:
     {
-        'score': float,        # positif = UP, negatif = DOWN
+        'score': float,        # positif = UP, négatif = DOWN
         'confidence': float,   # 0-1
         'direction': 'UP'|'DOWN',
         'indicators': list[dict]
