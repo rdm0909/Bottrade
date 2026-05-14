@@ -1,6 +1,7 @@
 """
 bot.py -- PolyBot BTC 5-Min Hausse/Baisse
-Bot de trading automatique pour les marches Polymarket BTC 5-minutes
+Bot de trading automatique pour les marchés Polymarket BTC 5-minutes
+FIXED: check_result() utilise Kraken au lieu de Binance
 
 Usage:
   python bot.py --dry-run --mode safe      # Simulation
@@ -52,7 +53,7 @@ def init_client():
     try:
         creds = client.create_or_derive_api_creds()
         client.set_api_creds(creds)
-        print("Client Polymarket initialise")
+        print("Client Polymarket initialisé")
     except Exception as e:
         print("Credentials error: " + str(e))
     return client
@@ -101,7 +102,7 @@ def calculate_bet(bankroll, mode):
 
 def place_trade(client, token_id, amount, dry_run):
     if dry_run:
-        print("  [DRY RUN] Ordre simule: %.2f USDC sur token %s..." % (amount, token_id[:12]))
+        print("  [DRY RUN] Ordre simulé: %.2f USDC sur token %s..." % (amount, token_id[:12]))
         return True
     try:
         order = MarketOrderArgs(
@@ -112,10 +113,10 @@ def place_trade(client, token_id, amount, dry_run):
         )
         signed = client.create_market_order(order)
         resp = client.post_order(signed, OrderType.FOK)
-        print("  Ordre place: " + str(resp))
+        print("  Ordre placé: " + str(resp))
         return True
     except Exception as e:
-        print("  FOK echoue: " + str(e) + " -- Tentative Limit Order...")
+        print("  FOK échoué: " + str(e) + " -- Tentative Limit Order...")
         try:
             limit_order = OrderArgs(
                 token_id=token_id,
@@ -125,38 +126,48 @@ def place_trade(client, token_id, amount, dry_run):
             )
             signed = client.create_order(limit_order)
             resp = client.post_order(signed, OrderType.GTC)
-            print("  Limit order place @ $0.95: " + str(resp))
+            print("  Limit order placé @ $0.95: " + str(resp))
             return True
         except Exception as e2:
-            print("  Limit order echoue: " + str(e2))
+            print("  Limit order échoué: " + str(e2))
             return False
 
 
 def check_result(window_ts):
-    """Verifie sur Binance si BTC a monte ou baisse."""
+    """Vérifie sur Kraken si BTC a monté ou baissé. (FIXED: Binance → Kraken)"""
     close_ts = window_ts + 300
     try:
         resp = requests.get(
-            "https://api.binance.com/api/v3/klines",
+            "https://api.kraken.com/0/public/OHLC",
             params={
-                "symbol": "BTCUSDT",
-                "interval": "1m",
-                "startTime": window_ts * 1000,
-                "endTime": (close_ts + 60) * 1000,
-                "limit": 10,
+                "pair": "XBTUSD",
+                "interval": 1,      # bougies 1 minute
+                "since": window_ts - 60,
             },
             timeout=10,
         )
-        candles = resp.json()
-        if not candles:
+        data = resp.json()
+        if data.get("error"):
+            print("  Kraken check_result error: " + str(data["error"]))
             return "UNKNOWN"
-        open_price = float(candles[0][1])
-        close_price = float(candles[-1][4])
+        candles_raw = data["result"]["XXBTZUSD"]
+        # Filtre les bougies dans la fenêtre [window_ts, close_ts]
+        window_candles = [
+            c for c in candles_raw
+            if window_ts <= int(c[0]) < close_ts
+        ]
+        if not window_candles:
+            # Fallback: prendre toutes les bougies disponibles
+            window_candles = candles_raw[-5:] if candles_raw else []
+        if not window_candles:
+            return "UNKNOWN"
+        open_price = float(window_candles[0][1])
+        close_price = float(window_candles[-1][4])
         result = "UP" if close_price >= open_price else "DOWN"
-        print("  Resolution: BTC %.2f -> %.2f = %s" % (open_price, close_price, result))
+        print("  Résolution: BTC %.2f -> %.2f = %s" % (open_price, close_price, result))
         return result
     except Exception as e:
-        print("  Resolution Binance error: " + str(e))
+        print("  Résolution Kraken error: " + str(e))
         return "UNKNOWN"
 
 
@@ -172,6 +183,7 @@ def run_bot(dry_run=False, mode=None, max_trades=None, once=False):
     print("=" * 44)
     print("  PolyBot BTC 5-Min -- " + ("DRY RUN" if dry_run else "LIVE TRADING"))
     print("  Mode: " + mode.upper() + "  Bankroll: $" + str(bankroll))
+    print("  Source données: Kraken (pas de blocage géo)")
     print("=" * 44)
     print("")
 
@@ -183,14 +195,14 @@ def run_bot(dry_run=False, mode=None, max_trades=None, once=False):
 
     while True:
         if max_trades and trade_count >= max_trades:
-            print("Max trades atteint (%d). Arret." % max_trades)
+            print("Max trades atteint (%d). Arrêt." % max_trades)
             break
 
         if bankroll < MIN_BET:
             print("Bankroll (%.2f) < Min Bet (%.2f)." % (bankroll, MIN_BET))
             if mode == "degen":
                 bankroll = STARTING_BANKROLL
-                print("Bankroll reset a $%.2f" % bankroll)
+                print("Bankroll reset à $%.2f" % bankroll)
             else:
                 break
 
@@ -200,7 +212,7 @@ def run_bot(dry_run=False, mode=None, max_trades=None, once=False):
         remaining = close_time - now
 
         ts_str = datetime.now().strftime("%H:%M:%S")
-        print("[%s] Fenetre: %d | Fermeture dans: %ds" % (ts_str, window_ts, remaining))
+        print("[%s] Fenêtre: %d | Fermeture dans: %ds" % (ts_str, window_ts, remaining))
 
         price = get_btc_price()
         if price:
@@ -252,13 +264,13 @@ def run_bot(dry_run=False, mode=None, max_trades=None, once=False):
 
             remaining_now = close_time - int(time.time())
             if remaining_now <= 5:
-                print("  T-5s: Trade force avec le meilleur signal")
+                print("  T-5s: Trade forcé avec le meilleur signal")
                 break
 
             time.sleep(2)
 
         if best_signal is None:
-            print("  Aucun signal -- fenetre manquee")
+            print("  Aucun signal -- fenêtre manquée")
             time.sleep(5)
             continue
 
@@ -269,7 +281,7 @@ def run_bot(dry_run=False, mode=None, max_trades=None, once=False):
 
         market = get_market(window_ts)
         if not market or (not market["up_token"] and not market["down_token"]):
-            print("  Marche Polymarket introuvable pour cette fenetre")
+            print("  Marché Polymarket introuvable pour cette fenêtre")
             time.sleep(5)
             continue
 
@@ -281,7 +293,7 @@ def run_bot(dry_run=False, mode=None, max_trades=None, once=False):
 
         print("")
         print("  TRADE: %s | Mise: $%.2f USDC" % (direction, bet_amount))
-        print("  Prix token Poly: $%.3f | Estime: $%.3f" % (token_price_poly, token_price_est))
+        print("  Prix token Poly: $%.3f | Estimé: $%.3f" % (token_price_poly, token_price_est))
 
         if token_id:
             success = place_trade(client, token_id, bet_amount, dry_run)
@@ -296,7 +308,7 @@ def run_bot(dry_run=False, mode=None, max_trades=None, once=False):
 
             wait_for_close = close_time - int(time.time()) + 3
             if wait_for_close > 0:
-                print("  Attente resolution (%ds)..." % wait_for_close)
+                print("  Attente résolution (%ds)..." % wait_for_close)
                 time.sleep(wait_for_close)
 
             result = check_result(window_ts)
@@ -320,7 +332,7 @@ def run_bot(dry_run=False, mode=None, max_trades=None, once=False):
                     trade_count, win_rate, total_profit, roi))
 
         if once:
-            print("Mode --once: arret apres 1 trade.")
+            print("Mode --once: arrêt après 1 trade.")
             break
 
         time.sleep(2)
@@ -328,7 +340,7 @@ def run_bot(dry_run=False, mode=None, max_trades=None, once=False):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="PolyBot BTC 5-Min Trading Bot")
-    parser.add_argument("--dry-run", action="store_true", help="Simulation sans trades reels")
+    parser.add_argument("--dry-run", action="store_true", help="Simulation sans trades réels")
     parser.add_argument("--mode", choices=["safe", "aggressive", "degen"], default=BOT_MODE)
     parser.add_argument("--max-trades", type=int, default=None)
     parser.add_argument("--once", action="store_true")
@@ -342,4 +354,4 @@ if __name__ == "__main__":
             once=args.once,
         )
     except KeyboardInterrupt:
-        print("Bot arrete manuellement.")
+        print("Bot arrêté manuellement.")
